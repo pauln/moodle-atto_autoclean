@@ -35,49 +35,60 @@ YUI.add('moodle-atto_autoclean-button', function (Y, NAME) {
 
 Y.namespace('M.atto_autoclean').Button = Y.Base.create('button', Y.M.editor_atto.EditorPlugin, [], {
     _dummyInserted : false,
+    _startRange : null,
     initializer: function() {
-        this.editor.on('paste', this.insertDummy, this);
+        this.editor.on('paste', this.startCapture, this);
     },
-    insertDummy : function(e) {
+    startCapture : function(e) {
         var host = this.get('host'),
-        range = rangy.createRange(), dummy;
-
-        // We don't want more than one dummy at a time.
-        if (!this._dummyInserted) {
-            host.saveSelection();
-            dummy = Y.Node.create('<div id="_atto_autoclean_pasted_content" contenteditable="true" style="position:absolute;left:-10000px;height:1px"></div>');
-            host.editor.insert(dummy, 'after');
-
-            range.selectNodeContents(dummy.getDOMNode());
-            host.setSelection([range]);
-            this._dummyInserted = true;
+            ranges = host.getSelection();
+        host.saveSelection();
+        if (!ranges[0].collapsed) {
+            document.execCommand('delete');
         }
+        this._startRange = host.getSelection()[0];
 
         // Spit - whether or not we inserted a new dummy.  Hopefully this will catch any lingering dummies.
-        Y.soon(Y.bind(this.spitDummy, this));
+        Y.soon(Y.bind(this.endCapture, this));
     },
-    spitDummy : function() {
+    endCapture : function() {
         var host = this.get('host'),
-        dummy = Y.one('#_atto_autoclean_pasted_content');
+            ranges = host.getSelection(),
+            endRange = ranges[0],
+            range = rangy.createRange();
 
-        // No point trying to process a non-existent dummy.
-        if (!this._dummyInserted) {
-            return;
+        range.setStart(this._startRange.startContainer, this._startRange.startOffset);
+        range.setEnd(endRange.startContainer, endRange.startOffset);
+        dummy = Y.Node.create('<div id="_atto_autoclean_pasted_content" contenteditable="true" style="position:absolute;left:-10000px;height:1px"></div>');
+        host.editor.insert(dummy, 'after');
+        dummy.insert(range.extractContents());
+
+        if (dummy.getHTML().length) {
+            // Clean up empty font tags in IE.
+            this.preClean(dummy);
+
+            // Fix lists which come through from Word as paragraphs.
+            this.fixLists(dummy);
+
+            // Clean up Word nonsense.
+            html = this.deepCleanHTML(dummy.getHTML());
+
+            // Paste cleaned content at location of original selection.
+            host.restoreSelection();
+            this._insertContentBeforeFocusPoint(html);
+        } else {
+            host.restoreSelection();
         }
-
-        // Fix lists which come through from Word as paragraphs.
-        this.fixLists(dummy);
-
-        // Clean up Word nonsense.
-        html = this.deepCleanHTML(dummy.getHTML());
-
-        // Paste cleaned content at location of original selection.
-        host.restoreSelection();
-        this._insertContentBeforeFocusPoint(html);
 
         // Remove dummy from page.
         dummy.remove(true);
-        this._dummyInserted = false;
+    },
+    preClean : function(el) {
+        el.all('font').each(function(tag) {
+            if(Y.Lang.trim(tag.getHTML()).length === 0) {
+                tag.remove();
+            }
+        });
     },
     fixLists : function(parent) {
         var inList = false,
@@ -109,6 +120,10 @@ Y.namespace('M.atto_autoclean').Button = Y.Base.create('button', Y.M.editor_atto
                 while (point.get('nodeType') === 8) {
                     // Skip the conditional comment.
                     point = point.get('nextSibling');
+                }
+                if (point.get('nodeName') === 'FONT') {
+                    // Grab the first child of the font tag.
+                    point = point.get('firstChild');
                 }
                 point.remove(true);
 
