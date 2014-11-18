@@ -32,34 +32,32 @@
  */
 
 Y.namespace('M.atto_autoclean').Button = Y.Base.create('button', Y.M.editor_atto.EditorPlugin, [], {
-    _dummyInserted : false,
-    _startRange : null,
+    _originalContent : null,
     initializer: function() {
         this.editor.on('paste', this.startCapture, this);
     },
     startCapture : function(e) {
-        var host = this.get('host'),
-            ranges = host.getSelection();
-        host.saveSelection();
-        if (!ranges[0].collapsed) {
-            document.execCommand('delete');
-        }
-        this._startRange = host.getSelection()[0];
+        var host = this.get('host');
 
-        // Spit - whether or not we inserted a new dummy.  Hopefully this will catch any lingering dummies.
+        // Put placeholder into editor content, store original content and clear editor.
+        host.insertContentAtFocusPoint('<span class="_atto_autoclean_placeholder"></span>');
+        this._originalContent = host.editor.getHTML();
+        host.editor.setHTML('');
+
+        // Allow the paste to actually happen before we try to grab the pasted content and clean it.
         Y.soon(Y.bind(this.endCapture, this));
     },
     endCapture : function() {
         var host = this.get('host'),
-            ranges = host.getSelection(),
-            endRange = ranges[0],
-            range = rangy.createRange();
+            range = rangy.createRange(),
+            placeholder, html;
 
-        range.setStart(this._startRange.startContainer, this._startRange.startOffset);
-        range.setEnd(endRange.startContainer, endRange.startOffset);
-        dummy = Y.Node.create('<div id="_atto_autoclean_pasted_content" contenteditable="true" style="position:absolute;left:-10000px;height:1px"></div>');
+        // Move pasted content into dummy and put original content back into editor.
+        dummy = Y.Node.create('<div id="_atto_autoclean_pasted_content" style="height:1px;position:absolute;left:-10000px;">'+host.editor.getHTML()+'</div>');
         host.editor.insert(dummy, 'after');
-        dummy.insert(range.extractContents());
+        host.editor.set('innerHTML', this._originalContent);
+        placeholder = host.editor.one('._atto_autoclean_placeholder');
+        range.selectNode(placeholder.getDOMNode());
 
         if (dummy.getHTML().length) {
             // Clean up empty font tags in IE.
@@ -68,23 +66,43 @@ Y.namespace('M.atto_autoclean').Button = Y.Base.create('button', Y.M.editor_atto
             // Fix lists which come through from Word as paragraphs.
             this.fixLists(dummy);
 
-            // Clean up Word nonsense.
-            html = this.deepCleanHTML(dummy.getHTML());
+            // Clean up unwanted inline CSS.
+            dummy.all('[style]').each(this.cleanStyles, this);
+
+            // Atto knows how to clean up a lot of the MS Word nonsense.
+            html = this.get('host')._cleanHTML(dummy.getHTML());
 
             // Paste cleaned content at location of original selection.
-            host.restoreSelection();
-            this._insertContentBeforeFocusPoint(html);
+            host.setSelection([range]);
+            this._insertContentBeforeFocusPoint(html, range);
         } else {
-            host.restoreSelection();
+            range.deleteContents();
+            host.setSelection([range]);
         }
 
         // Remove dummy from page.
         dummy.remove(true);
     },
     preClean : function(el) {
+        var spans = el.all('span');
+        while (spans.size() > 0) {
+            var tag = spans.pop();
+            if (/mso-bookmark/.test(tag.getAttribute('style'))) {
+                tag.replace(Y.Node.create(tag.get('innerHTML')));
+            }
+        }
         el.all('font').each(function(tag) {
             if(Y.Lang.trim(tag.getHTML()).length === 0) {
-                tag.remove();
+                tag.remove(true);
+            }
+        });
+        el.all('a').each(function(tag) {
+            if(tag.hasAttribute('name') && !tag.hasAttribute('href')) {
+                if (tag.getHTML().length) {
+                    tag.replace(Y.Node.create(tag.get('innerHTML')));
+                } else {
+                    tag.remove(true);
+                }
             }
         });
     },
@@ -144,29 +162,38 @@ Y.namespace('M.atto_autoclean').Button = Y.Base.create('button', Y.M.editor_atto
                 el.get('children').each(function(child) {
                     lastnode.appendChild(child);
                 }, this);
-                el.get('parentNode').removeChild(el);
+                el.remove(true);
             } else {
                 lastnodename = nodename;
                 lastnode = el;
             }
         }, this);
     },
-    deepCleanHTML : function(html) {
-        // Atto knows how to clean up a lot of the MS Word nonsense.
-        html = this.get('host')._cleanHTML(html);
+    /**
+     * Removes unwanted inline CSS from the given element.
+     *
+     * @method cleanStyles
+     * @param {Node} tag YUI Node representing the element to clean
+     */
+    cleanStyles : function(tag) {
+        var styles, value;
 
-        // Remove "type" attribute from lists.
-        html = html.replace(/<(o|u)l[^>]+?type="[^"]+?"/gi, '<$1l');
-        // Remove line-height:normal.
-        html = html.replace(/(<[^>]+?style="[^"]*)line-height:normal;?/gi, '$1');
-        // Remove tab-stops.
-        html = html.replace(/(<[^>]+?style="[^"]*)tab-stops:[^;"]+?(;|")/gi, '$1$2');
-        // Remove empty style attributes.
-        html = html.replace(/(<[^>]+?) style=";?"/gi, '$1');
-        // Replace escaped quotes with single-quotes in style attributes.
-        html = html.replace(/(<[^>]+? style=")([^"]+)"/gi, function(a,b,c){return b+(c.replace(/&quot;/gi, "'"))+'"';});
+        // Remove unwanted rules (mso-* and certain other styles).
+        styles = tag.getAttribute('style').split(';');
+        value = '';
+        for (var i=0;i<styles.length;i++) {
+            var style = styles[i].trim();
+            if (!style.length || /^(mso-|tab-stops|font-family)/i.test(style)) {
+                continue;
+            }
+            value += style+';';
+        }
 
-        return html;
+        if (value.length) {
+            tag.setAttribute('style', value);
+        } else {
+            tag.removeAttribute('style');
+        }
     },
     /**
      * Inserts the given HTML into the editable content at the currently focused point,
@@ -175,19 +202,14 @@ Y.namespace('M.atto_autoclean').Button = Y.Base.create('button', Y.M.editor_atto
      * @method _insertContentBeforeFocusPoint
      * @param {String} html
      */
-    _insertContentBeforeFocusPoint: function(html) {
-        var selection = rangy.getSelection(),
-            range,
-            node = Y.Node.create(html),
+    _insertContentBeforeFocusPoint: function(html, range) {
+        var node = Y.Node.create(html),
             domnode = node.getDOMNode(),
             lastnode = domnode,
             host = this.get('host'),
             editor = host.editor,
             edpos, edtop, edheight, pasteheight;
 
-        if (selection.rangeCount) {
-            range = selection.getRangeAt(0);
-        }
         if (range) {
             if (domnode.nodeType === 11) {
                 // Document fragment - collapse after last child node.
